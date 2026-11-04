@@ -136,6 +136,7 @@ label.check{flex-direction:row; align-items:center; gap:8px}
   <section class="sheet" id="sheetPanel" hidden>
     <p>Paste the chord sheet from Ultimate Guitar here. Lyrics and section labels can come along; the page only reads the chord lines. Play the song through once with listening on, then click Line up chords.</p>
     <textarea id="sheetText" spellcheck="false" aria-label="Chord sheet" placeholder="[Intro]&#10;Em  G  A  x4&#10;&#10;[Verse 1]&#10;Em   G   A   Em&#10;..."></textarea>
+    <p id="sheetInfo"></p>
     <div class="row">
       <button id="alignBtn">Line up chords</button>
       <button id="clearSheet" class="quiet">Remove sheet</button>
@@ -258,6 +259,9 @@ function parseChord(tok){
 }
 function parseSheet(text){
   const seq = []; let section = "";
+  const cm0 = text.match(/capo[^\n\d]{0,15}(\d{1,2})/i);
+  const firstHeader = text.search(/^[ \t]*\[[^\]\n]+\][ \t]*$/m);
+  if (firstHeader > 0) text = text.slice(firstHeader);
   const cm = text.match(/capo[^\n\d]{0,15}(\d{1,2})/i);
   for (const raw of text.split(/\r?\n/)){
     const line = raw.trim(); if (!line) continue;
@@ -277,7 +281,7 @@ function parseSheet(text){
       if (!last || last.name !== c.name) seq.push(Object.assign({section}, c));
     });
   }
-  return {seq, capo: cm ? +cm[1] : null};
+  return {seq, capo: cm0 ? +cm0[1] : (cm ? +cm[1] : null)};
 }
 // common shapes that aren't plain triads or 7ths
 const EXTRA = {
@@ -290,13 +294,13 @@ function chartFor(name){
   const c = parseChord(name); if (!c) return "";
   return chartSVG(voicing(c.root, c.chartQ), name);
 }
-function bestChord(c, b){
+function bestChord(c, b, list = templates){
   const v = center(Array.from(c));
   const bmax = Math.max(...b) || 1;
   let best = null, bs = -Infinity;
-  for (const t of templates){
+  for (const t of list){
     let s = 0; for (let k=0; k<12; k++) s += v[k]*t.vec[k];
-    s = s*t.bias + 0.12*(b[t.root]/bmax);
+    s = s*t.bias + 0.12*(b[t.bassRoot ?? t.root]/bmax);
     if (s > bs){ bs = s; best = t; }
   }
   return {t:best, score:bs};
@@ -323,6 +327,7 @@ let needSave = false, needCompute = false, lastSave = 0, lastCompute = 0;
 let lastVT = null, skipUntil = 0;
 let shown = null, barsKey = "";
 let meta = {capo:0, sheet:"", aligned:null}, sheetSegs = [], needAlign = false;
+let sheetParsed = {seq:[], capo:null}, vocabT = [], sheetK = 0, lastAlign = 0;
 
 function status(t){ $("status").textContent = t; }
 function fmt(t){ t = Math.max(0, Math.floor(t)); return `${Math.floor(t/60)}:${String(t%60).padStart(2,"0")}`; }
@@ -380,7 +385,7 @@ function loadVideo(){
 function onState(e){
   playing = e.data === YT.PlayerState.PLAYING;
   skipUntil = performance.now() + 500;
-  if (!playing){ computeSegments(); saveSong(); if (needAlign && meta.sheet && coverage() >= 0.9) lineUp(true); }
+  if (!playing){ computeSegments(); saveSong(); if (needAlign && sheetActive() && coverage() >= 0.5) lineUp(true); }
   renderTimeline();
 }
 function onErr(e){
@@ -445,16 +450,18 @@ function computeSegments(){
   const keys = [...slots.keys()];
   if (!keys.length){ renderTimeline(); return; }
   const T0 = Math.min(...keys), T = Math.max(...keys) + 1 - T0;
-  const NC = templates.length, SIL = NC + 1, C = NC + 2, M = minSlots(), SW = 0.2;
+  if (sheetActive()) refreshVocab();
+  const tpls = activeTemplates();
+  const NC = tpls.length, SIL = NC + 1, C = NC + 2, M = minSlots(), SW = 0.2;
   const picky = settings.picky / 100;
   const E = new Float32Array(T*C);
   for (let t=0; t<T; t++){
     const sv = slotVec(T0+t), o = t*C;
     if (!sv){ E[o+SIL] = 0.5; continue; }
     for (let c=0; c<NC; c++){
-      const tp = templates[c]; let d = 0;
+      const tp = tpls[c]; let d = 0;
       for (let q=0; q<12; q++) d += sv.v[q]*tp.vec[q];
-      E[o+c] = d*tp.bias + 0.12*(sv.b[tp.root]/sv.bmax);
+      E[o+c] = d*tp.bias + 0.12*(sv.b[tp.bassRoot ?? tp.root]/sv.bmax);
     }
     E[o+NC] = picky; E[o+SIL] = -0.5;
   }
@@ -490,7 +497,7 @@ function computeSegments(){
     else if (!(j === M-1 && code === 255)) j -= 1;
   }
   for (let t=0; t<T; t++){
-    const name = lab[t] === NC ? "N.C." : lab[t] === SIL ? "—" : templates[lab[t]].name;
+    const name = lab[t] === NC ? "N.C." : lab[t] === SIL ? "—" : tpls[lab[t]].name;
     const start = (T0+t)*SLOT, last = segments[segments.length-1];
     if (last && last.chord === name && Math.abs(last.end - start) < 1e-6) last.end = start + SLOT;
     else segments.push({start, end:start+SLOT, chord:name});
@@ -508,6 +515,51 @@ function loadMeta(id){
   if (!slots.size) meta.aligned = null;
   sheetSegs = meta.aligned ? meta.aligned.segs : [];
   if (meta.sheet) $("sheetPanel").hidden = false;
+  refreshVocab(); updateSheetInfo();
+}
+// When a chord sheet is present, the page only ever chooses from the sheet's chords.
+function sheetActive(){ return $("useSheet").checked && sheetParsed.seq.length > 0; }
+function activeTemplates(){ return sheetActive() ? vocabT : templates; }
+function disp(label){ return sheetActive() ? label : capoName(label); }
+function shapeVec(c, k){
+  const t = new Array(12).fill(0);
+  c.iv.forEach((x,i) => { t[(c.root+k+x)%12] += i===0 ? 1.5 : 1; });
+  return center(t);
+}
+function sheetChords(){
+  const seen = new Map();
+  sheetParsed.seq.forEach(c => { if (!seen.has(c.name)) seen.set(c.name, c); });
+  return [...seen.values()];
+}
+// Which key/capo does the recording use? Use the lined-up answer if there is one,
+// otherwise test all 12 against what has been heard so far.
+function estimateKey(uniq){
+  if (meta.aligned) return meta.aligned.k;
+  const vecs = [];
+  slots.forEach((s,i) => { if (i % 2 === 0){ const v = slotVec(i); if (v) vecs.push(v); } });
+  if (vecs.length < 25) return sheetParsed.capo ?? 0;
+  let best = 0, bs = -Infinity;
+  for (let k=0; k<12; k++){
+    const tv = uniq.map(c => shapeVec(c, k));
+    let sc = 0;
+    for (const v of vecs){ let m = -Infinity; for (const t of tv){ let d = 0; for (let q=0; q<12; q++) d += v.v[q]*t[q]; if (d > m) m = d; } sc += m; }
+    if (sc > bs){ bs = sc; best = k; }
+  }
+  return best;
+}
+function refreshVocab(){
+  sheetParsed = parseSheet(meta.sheet || "");
+  const uniq = sheetChords();
+  sheetK = uniq.length ? estimateKey(uniq) : 0;
+  vocabT = uniq.map(c => ({name:c.name, root:(c.root+sheetK)%12, bassRoot:(c.bass+sheetK)%12, vec:shapeVec(c, sheetK), bias:1}));
+}
+function updateSheetInfo(){
+  const seq = sheetParsed.seq;
+  if (!meta.sheet.trim()){ $("sheetInfo").textContent = ""; return; }
+  if (!seq.length){ $("sheetInfo").textContent = "No chord lines found yet. Paste the whole sheet, including the lines with chords."; return; }
+  const sections = new Set(seq.map(c => c.section).filter(Boolean)).size;
+  $("sheetInfo").textContent = `Read ${seq.length} chord changes${sections ? ` across ${sections} sections` : ""}, using only: ${sheetChords().map(c => c.name).join(", ")}.`
+    + (sheetParsed.capo !== null ? ` Capo ${sheetParsed.capo} noted.` : "");
 }
 function saveMeta(){ if (videoId) store.set(metaKey(videoId), meta); }
 function capoName(label){
@@ -573,7 +625,9 @@ function align(seq){
     const c = seq[sg.i], root = (c.root + k) % 12, minor = c.chartQ.startsWith("m");
     for (let t = Math.round(sg.start/SLOT); t < Math.round(sg.end/SLOT); t++){
       const L = segments.find(s => (t+0.5)*SLOT >= s.start && (t+0.5)*SLOT < s.end);
-      const tpl = L && byName[L.chord]; if (!tpl) continue;
+      if (!L || L.chord === "—" || L.chord === "N.C.") continue;
+      if (sheetActive()){ total++; if (L.chord === c.name) agree++; continue; }
+      const tpl = byName[L.chord]; if (!tpl) continue;
       total++; if (tpl.root === root && tpl.q.startsWith("m") === minor) agree++;
     }
   }
@@ -581,7 +635,8 @@ function align(seq){
 }
 function lineUp(quiet){
   meta.sheet = $("sheetText").value;
-  const parsed = parseSheet(meta.sheet);
+  refreshVocab(); updateSheetInfo();
+  const parsed = sheetParsed;
   if (!parsed.seq.length){ if (!quiet) status("I couldn’t find any chord lines in that text. Paste the whole sheet, including the lines with chords."); saveMeta(); return; }
   const cov = coverage();
   if (cov < 0.5){
@@ -591,10 +646,12 @@ function lineUp(quiet){
   }
   computeSegments();
   const r = align(parsed.seq); if (!r) return;
+  const first = !meta.aligned;
   meta.aligned = {k:r.k, segs:r.segs}; sheetSegs = r.segs; needAlign = false;
+  refreshVocab(); computeSegments();
   if (r.k <= 7){ meta.capo = r.k; $("capo").value = r.k; }
   saveMeta(); renderTimeline();
-  if (quiet) return;
+  if (quiet){ if (first) status("Your chord sheet is now lined up to the song."); return; }
   let msg = `Lined up ${parsed.seq.length} chord changes from your sheet. `;
   if (r.k === 0) msg += "The recording is in the same key as the sheet. ";
   else if (r.k <= 7) msg += `The recording matches the sheet played with capo ${r.k}. `;
@@ -613,7 +670,7 @@ function renderTimeline(){
   if (dur){
     let alt = false;
     const list = ($("useSheet").checked && sheetSegs.length) ? sheetSegs
-      : segments.map(s => ({start:s.start, end:s.end, chord:capoName(s.chord)}));
+      : segments.map(s => ({start:s.start, end:s.end, chord:disp(s.chord)}));
     for (const s of list){
       if (s.chord === "—") continue;
       const d = document.createElement("div");
@@ -703,7 +760,7 @@ function tick(){
   for (let p=0; p<12; p++){ ema[p] = ema[p]*(1-a) + c[p]*a; emaB[p] = emaB[p]*(1-a) + b[p]*a; }
   let label = "—"; liveConf = 0;
   if (!silent){
-    const r = bestChord(ema, emaB);
+    const r = bestChord(ema, emaB, activeTemplates());
     liveConf = Math.max(0, Math.min(1, r.score));
     label = r.score >= settings.picky/100 ? r.t.name : "N.C.";
   }
@@ -717,6 +774,7 @@ function tick(){
   }
   const now = performance.now();
   if (needCompute && now - lastCompute > 2000){ computeSegments(); lastCompute = now; }
+  if (sheetActive() && needAlign && now - lastAlign > 15000 && coverage() >= 0.5){ lastAlign = now; lineUp(true); }
   if (needSave && now - lastSave > 5000){ saveSong(); lastSave = now; }
 }
 
@@ -784,22 +842,26 @@ function updateDisplay(){
   // 2) chords the page learned by listening
   const idx = t !== null ? segments.findIndex(s => t >= s.start && t < s.end) : -1;
   if (idx >= 0){
-    const list = segments.map(s => ({start:s.start, chord:capoName(s.chord)}));
+    const list = segments.map(s => ({start:s.start, chord:disp(s.chord)}));
     const cur = list[idx].chord;
     showChord(cur);
     const {up, firstStart} = upcoming(list, idx+1, cur);
     showNext(up, firstStart, t);
     $("meter").hidden = true;
-    $("mode").textContent = "Showing learned chords, right on time.";
+    $("mode").textContent = sheetActive()
+      ? "Using only your sheet’s chords. They’ll follow the sheet’s order once the song is lined up."
+      : "Showing learned chords, right on time.";
     showBars("Coming up", up);
   } else if (stream){
   // 3) live listening
-    showChord(capoName(liveCurrent || "—"));
+    showChord(disp(liveCurrent || "—"));
     $("next").textContent = "";
     $("meter").hidden = false;
     $("conf").style.width = (liveConf*100).toFixed(0) + "%";
-    $("mode").textContent = "Listening live, about 1 second behind. Play it again for on-time chords.";
-    showBars("Recent", liveHistory.map(capoName));
+    $("mode").textContent = sheetActive()
+      ? "Listening live using only your sheet’s chords, about 1 second behind."
+      : "Listening live, about 1 second behind. Play it again for on-time chords.";
+    showBars("Recent", liveHistory.map(disp));
   } else {
     showChord("—");
     $("next").textContent = "";
@@ -813,7 +875,7 @@ setInterval(updateDisplay, 80);
 // ---------- buttons ----------
 $("copy").addEventListener("click", async () => {
   const src = ($("useSheet").checked && sheetSegs.length) ? sheetSegs
-    : segments.filter(s => byName[s.chord]).map(s => ({start:s.start, chord:capoName(s.chord)}));
+    : segments.filter(s => s.chord !== "—" && s.chord !== "N.C.").map(s => ({start:s.start, chord:disp(s.chord)}));
   const lines = src.length ? src.map(s => `${fmt(s.start)}  ${s.chord}`) : liveLog;
   if (!lines.length){ status("No chords yet. Play a song with listening on first."); return; }
   try{ await navigator.clipboard.writeText(lines.join("\n")); status(`Copied ${lines.length} chord changes.`); }
@@ -832,10 +894,19 @@ $("alignBtn").addEventListener("click", () => {
 });
 $("clearSheet").addEventListener("click", () => {
   $("sheetText").value = ""; meta.sheet = ""; meta.aligned = null; sheetSegs = [];
-  saveMeta(); renderTimeline(); status("Removed the chord sheet for this song.");
+  refreshVocab(); updateSheetInfo(); saveMeta(); liveHistory.length = 0; computeSegments(); status("Removed the chord sheet for this song.");
 });
 $("capo").addEventListener("change", () => { meta.capo = +$("capo").value; saveMeta(); shown = null; barsKey = ""; renderTimeline(); });
-$("useSheet").addEventListener("change", () => { shown = null; barsKey = ""; renderTimeline(); });
+$("useSheet").addEventListener("change", () => { shown = null; barsKey = ""; liveHistory.length = 0; computeSegments(); });
+let sheetTimer = null;
+$("sheetText").addEventListener("input", () => {
+  clearTimeout(sheetTimer);
+  sheetTimer = setTimeout(() => {
+    meta.sheet = $("sheetText").value; meta.aligned = null; sheetSegs = [];
+    refreshVocab(); updateSheetInfo(); saveMeta(); liveHistory.length = 0; computeSegments();
+    if (videoId && sheetActive() && coverage() >= 0.5) lineUp(false);
+  }, 600);
+});
 window.addEventListener("beforeunload", saveSong);
 if (!navigator.mediaDevices || !navigator.mediaDevices.getDisplayMedia){
   status("This browser can’t listen to tab audio. Use Chrome or Edge on a computer. Learned songs still play with chords.");
