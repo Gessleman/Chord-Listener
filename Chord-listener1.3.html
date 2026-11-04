@@ -1,0 +1,562 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="strict-origin-when-cross-origin">
+<title>Chord Listener</title>
+<style>
+:root{
+  --bg:#E8ECEF; --surface:#F6F8F9; --ink:#1D2329; --muted:#5B6670; --accent:#9A5A12; --line:#BFC8D0;
+  --seg:#DCE2E7; --seg2:#CFD7DD;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --bg:#221713; --surface:#2E211C; --ink:#F0E7D8; --muted:#B4A38F; --accent:#E3A64B; --line:#4D3A31;
+    --seg:#3A2A23; --seg2:#45332A;
+    color-scheme: dark;
+  }
+}
+*{box-sizing:border-box}
+html,body{margin:0}
+body{
+  background:var(--bg); color:var(--ink); min-height:100vh;
+  font-family:"Segoe UI",system-ui,-apple-system,"Helvetica Neue",Arial,sans-serif;
+  padding:20px clamp(14px,3vw,32px) 32px;
+}
+.wrap{max-width:1200px; margin:0 auto; display:flex; flex-direction:column; gap:20px}
+.display{font-family:Bahnschrift,"DIN Alternate","Avenir Next Condensed","Arial Narrow",sans-serif}
+header{display:flex; align-items:center; gap:12px 16px; flex-wrap:wrap}
+h1{font-size:1.15rem; font-weight:600; margin:0 auto 0 0}
+.load{display:flex; gap:8px; flex:1 1 380px; max-width:620px}
+.load input{
+  flex:1; min-width:0; font:inherit; padding:.5em .9em; border-radius:999px;
+  border:2px solid var(--line); background:var(--surface); color:var(--ink);
+}
+button{
+  font:inherit; font-weight:600; cursor:pointer; white-space:nowrap;
+  border:2px solid var(--accent); background:var(--accent); color:var(--bg);
+  padding:.5em 1.2em; border-radius:999px;
+}
+button.quiet{background:transparent; color:var(--accent)}
+button:focus-visible,input:focus-visible,.timeline:focus-visible{outline:3px solid var(--ink); outline-offset:3px}
+
+.stage{display:grid; grid-template-columns:minmax(0,1.35fr) minmax(0,1fr); gap:28px; align-items:center}
+@media (max-width:860px){.stage{grid-template-columns:1fr}}
+.video{position:relative; aspect-ratio:16/9; background:var(--surface); border:1px solid var(--line); border-radius:12px; overflow:hidden}
+#player{position:absolute; inset:0; width:100%; height:100%; border:0}
+#placeholder{position:absolute; inset:0; display:grid; place-items:center; padding:24px; text-align:center; color:var(--muted); line-height:1.5}
+
+.now{display:flex; flex-direction:column; align-items:center; gap:14px}
+.now-row{display:flex; align-items:center; justify-content:center; gap:clamp(14px,3vw,36px)}
+#chord{margin:0; line-height:.9; font-weight:700; font-size:clamp(5rem,13vw,11rem); letter-spacing:-.02em; min-height:1em}
+#chord .q{font-size:.45em; font-weight:500; margin-left:.03em}
+#chord.idle{color:var(--line)}
+#diagram{width:clamp(110px,14vw,170px)}
+#diagram:empty{display:none}
+#mode{margin:0; color:var(--muted); font-size:.95rem; text-align:center}
+#next{margin:0; font-size:1.25rem; min-height:1.5em}
+#next b{color:var(--accent)}
+.meter{width:min(320px,80%); height:6px; background:var(--line); border-radius:3px; overflow:hidden}
+.meter span{display:block; height:100%; width:0; background:var(--accent); transition:width .15s linear}
+.meter[hidden]{display:none}
+
+.timeline{position:relative; height:46px; background:var(--surface); border:1px solid var(--line); border-radius:8px; overflow:hidden; cursor:pointer}
+.seg{position:absolute; top:0; bottom:0; background:var(--seg); border-right:1px solid var(--bg);
+  display:flex; align-items:center; padding-left:5px; font-size:.85rem; font-weight:600; white-space:nowrap; overflow:hidden}
+.seg.alt{background:var(--seg2)}
+.seg.nc{background:transparent}
+#playhead{position:absolute; top:0; bottom:0; width:3px; background:var(--accent); left:0; pointer-events:none}
+.under{display:flex; justify-content:space-between; gap:12px; flex-wrap:wrap; color:var(--muted); font-size:.9rem; margin-top:-10px}
+
+#barsLabel{margin:0; color:var(--muted); font-size:.9rem; text-align:center}
+#bars{list-style:none; margin:0; padding:0; display:flex; flex-wrap:wrap; justify-content:center; font-size:clamp(1.2rem,2.6vw,1.7rem); color:var(--muted)}
+#bars li{padding:.15em .9em; border-left:2px solid var(--line); display:flex; flex-direction:column; align-items:center; gap:6px}
+#bars li:last-child{border-right:2px solid var(--line)}
+#bars li .chart{width:clamp(48px,6vw,62px)}
+
+#status{margin:0; text-align:center; color:var(--muted); line-height:1.5}
+footer{display:flex; flex-wrap:wrap; gap:16px 30px; align-items:center; justify-content:center;
+  background:var(--surface); border:1px solid var(--line); border-radius:14px; padding:16px 20px}
+label{display:flex; flex-direction:column; gap:6px; font-size:.9rem; color:var(--muted)}
+input[type=range]{width:170px; accent-color:var(--accent)}
+
+.chart{display:block; width:100%; height:auto}
+.chart .grid{stroke:var(--muted); stroke-width:1.2}
+.chart .nut{stroke:var(--ink); stroke-width:4}
+.chart .dot{fill:var(--accent)}
+.chart .open{fill:none; stroke:var(--muted); stroke-width:1.4}
+.chart .mark{fill:var(--muted); font:600 11px "Segoe UI",system-ui,sans-serif; text-anchor:middle}
+.chart .pos{fill:var(--ink); font:700 16px "Segoe UI",system-ui,sans-serif; text-anchor:end}
+@media (prefers-reduced-motion: reduce){.meter span{transition:none}}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>Chord Listener</h1>
+    <div class="load">
+      <input id="url" type="text" placeholder="Paste a YouTube link" aria-label="YouTube link">
+      <button id="loadBtn" class="quiet">Load song</button>
+    </div>
+    <button id="listen">Turn on listening</button>
+  </header>
+
+  <section class="stage">
+    <div class="video">
+      <div id="placeholder">Paste a YouTube link above and click Load song.</div>
+      <div id="player"></div>
+    </div>
+    <div class="now">
+      <div class="now-row">
+        <p id="chord" class="display idle">—</p>
+        <div id="diagram"></div>
+      </div>
+      <p id="next" class="display"></p>
+      <div class="meter" id="meter" hidden><span id="conf"></span></div>
+      <p id="mode"></p>
+    </div>
+  </section>
+
+  <div class="timeline" id="timeline" tabindex="0" aria-label="Song timeline. Click to jump. Left and right arrows skip 5 seconds."><div id="playhead"></div></div>
+  <div class="under"><span id="coverage">Learned chords will appear on this timeline.</span><span>Click the timeline to jump</span></div>
+
+  <p id="barsLabel"></p>
+  <ol id="bars" class="display" aria-live="off"></ol>
+
+  <p id="status">Load a song, turn on listening, and play it once. After that, chords show right on time.</p>
+
+  <footer>
+    <label>Steadiness (live listening only)
+      <input id="steady" type="range" min="2" max="15" value="6">
+    </label>
+    <label>Pickiness (higher = more “no chord”)
+      <input id="picky" type="range" min="25" max="80" value="45">
+    </label>
+    <label>Timing nudge (<span id="syncVal">0.00</span>s)
+      <input id="sync" type="range" min="-0.6" max="0.6" step="0.05" value="0">
+    </label>
+    <button id="copy" class="quiet">Copy chords</button>
+    <button id="forget" class="quiet">Forget this song</button>
+  </footer>
+</div>
+
+<script>
+// ---------- chord templates and guitar charts ----------
+const NOTES = ["C","C♯","D","E♭","E","F","F♯","G","A♭","A","B♭","B"];
+const QUAL  = {"":[0,4,7], "m":[0,3,7], "7":[0,4,7,10], "m7":[0,3,7,10], "maj7":[0,4,7,11]};
+const OPEN = {
+  "C":[-1,3,2,0,1,0], "C7":[-1,3,2,3,1,0], "Cmaj7":[-1,3,2,0,0,0],
+  "D":[-1,-1,0,2,3,2], "Dm":[-1,-1,0,2,3,1], "D7":[-1,-1,0,2,1,2], "Dm7":[-1,-1,0,2,1,1], "Dmaj7":[-1,-1,0,2,2,2],
+  "G":[3,2,0,0,0,3], "G7":[3,2,0,0,0,1], "Gmaj7":[3,2,0,0,0,2],
+  "Fmaj7":[-1,-1,3,2,1,0], "B7":[-1,2,1,2,0,2]
+};
+const SHAPE_E = {"":[0,2,2,1,0,0], "m":[0,2,2,0,0,0], "7":[0,2,0,1,0,0], "m7":[0,2,0,0,0,0], "maj7":[0,2,1,1,0,0]};
+const SHAPE_A = {"":[-1,0,2,2,2,0], "m":[-1,0,2,2,1,0], "7":[-1,0,2,0,2,0], "m7":[-1,0,2,0,1,0], "maj7":[-1,0,2,1,2,0]};
+
+function voicing(root, q){
+  const name = NOTES[root] + q;
+  if (OPEN[name]) return {frets:OPEN[name], barre:0, from:0};
+  const r6 = (root - 4 + 12) % 12, r5 = (root - 9 + 12) % 12;
+  const useE = r6 <= r5, base = useE ? r6 : r5;
+  const shape = (useE ? SHAPE_E : SHAPE_A)[q];
+  return {frets: shape.map(o => o < 0 ? -1 : o + base), barre: base, from: useE ? 0 : 1};
+}
+function chartSVG(v, name){
+  const fretted = v.frets.filter(f => f > 0);
+  const maxF = Math.max(0, ...fretted);
+  const start = v.barre > 0 ? v.barre : (maxF <= 4 ? 1 : Math.min(...fretted));
+  const X = i => 32 + i*12, Y = f => 26 + (f - start + 0.5)*22;
+  let s = `<svg class="chart" viewBox="0 0 100 120" role="img" aria-label="${name} chord chart">`;
+  for (let i=0; i<6; i++) s += `<line class="grid" x1="${X(i)}" y1="26" x2="${X(i)}" y2="114"/>`;
+  for (let k=0; k<=4; k++) s += `<line class="grid" x1="${X(0)}" y1="${26+k*22}" x2="${X(5)}" y2="${26+k*22}"/>`;
+  if (start === 1) s += `<line class="nut" x1="${X(0)-1}" y1="26" x2="${X(5)+1}" y2="26"/>`;
+  if (v.barre > 0 || start > 1) s += `<text class="pos" x="${X(0)-9}" y="${Y(start)+5}">${start}</text>`;
+  v.frets.forEach((f,i) => {
+    if (f < 0) s += `<text class="mark" x="${X(i)}" y="19">×</text>`;
+    else if (f === 0) s += `<circle class="open" cx="${X(i)}" cy="15" r="3.5"/>`;
+  });
+  if (v.barre > 0) s += `<rect class="dot" x="${X(v.from)-5}" y="${Y(v.barre)-5}" width="${X(5)-X(v.from)+10}" height="10" rx="5"/>`;
+  v.frets.forEach((f,i) => {
+    if (f > 0 && !(v.barre > 0 && f === v.barre)) s += `<circle class="dot" cx="${X(i)}" cy="${Y(f)}" r="5"/>`;
+  });
+  return s + `</svg>`;
+}
+function center(v){
+  const m = v.reduce((a,b)=>a+b,0)/v.length;
+  const c = v.map(x=>x-m);
+  const n = Math.hypot(...c) || 1;
+  return c.map(x=>x/n);
+}
+const templates = [];
+for (let r=0; r<12; r++){
+  for (const [q, iv] of Object.entries(QUAL)){
+    const t = new Array(12).fill(0);
+    iv.forEach((x,i)=>{ t[(r+x)%12] = i===0 ? 1.5 : 1; });
+    templates.push({root:r, q, name:NOTES[r]+q, vec:center(t), bias: iv.length===3 ? 1 : 0.95, voicing: voicing(r, q)});
+  }
+}
+const byName = Object.fromEntries(templates.map(t => [t.name, t]));
+function bestChord(c, b){
+  const v = center(Array.from(c));
+  const bmax = Math.max(...b) || 1;
+  let best = null, bs = -Infinity;
+  for (const t of templates){
+    let s = 0; for (let k=0; k<12; k++) s += v[k]*t.vec[k];
+    s = s*t.bias + 0.12*(b[t.root]/bmax);
+    if (s > bs){ bs = s; best = t; }
+  }
+  return {t:best, score:bs};
+}
+
+// ---------- state ----------
+const SLOT = 0.2;      // seconds per learned time slot
+const REC_LAT = 0.3;   // how far the heard audio trails the video clock
+const $ = id => document.getElementById(id);
+const store = {
+  get(k){ try{ return JSON.parse(localStorage.getItem(k)); }catch(e){ return null; } },
+  set(k,v){ try{ localStorage.setItem(k, JSON.stringify(v)); return true; }catch(e){ return false; } },
+  del(k){ try{ localStorage.removeItem(k); }catch(e){} }
+};
+const settings = Object.assign({steady:6, picky:45, sync:0}, store.get("chordListener:settings") || {});
+
+let player = null, playerReady = false, videoId = null, playing = false, knownDur = 0;
+let ctx = null, analyser, stream = null, timer = null, binPc, binBass, freq;
+const ema = new Float32Array(12), emaB = new Float32Array(12);
+let liveCurrent = null, candidate = null, count = 0, liveConf = 0;
+const liveHistory = [], liveLog = [];
+let slots = new Map(), segments = [];
+let needSave = false, needCompute = false, lastSave = 0, lastCompute = 0;
+let lastVT = null, skipUntil = 0;
+let shown = null, barsKey = "";
+
+function status(t){ $("status").textContent = t; }
+function fmt(t){ t = Math.max(0, Math.floor(t)); return `${Math.floor(t/60)}:${String(t%60).padStart(2,"0")}`; }
+
+// ---------- settings ----------
+function applySettings(){
+  $("steady").value = settings.steady; $("picky").value = settings.picky; $("sync").value = settings.sync;
+  $("syncVal").textContent = (+settings.sync).toFixed(2);
+}
+applySettings();
+["steady","picky","sync"].forEach(id => $(id).addEventListener("input", () => {
+  settings[id] = +$(id).value;
+  $("syncVal").textContent = (+settings.sync).toFixed(2);
+  store.set("chordListener:settings", settings);
+  if (id === "picky") computeSegments();
+}));
+
+// ---------- YouTube player ----------
+(function(){ const s = document.createElement("script"); s.src = "https://www.youtube.com/iframe_api"; document.head.append(s); })();
+window.onYouTubeIframeAPIReady = () => {};
+
+function parseId(s){
+  s = s.trim();
+  const m = s.match(/(?:youtu\.be\/|[?&]v=|\/shorts\/|\/embed\/|\/live\/)([\w-]{11})/);
+  if (m) return m[1];
+  return /^[\w-]{11}$/.test(s) ? s : null;
+}
+function loadVideo(){
+  const id = parseId($("url").value);
+  if (!id){ status("That doesn’t look like a YouTube link. Copy the address from the video’s page and paste it here."); return; }
+  if (!window.YT || !YT.Player){ status("The YouTube player is still loading. Try again in a moment."); return; }
+  saveSong();
+  videoId = id; slots = loadSong(id); knownDur = 0; lastVT = null;
+  computeSegments();
+  $("placeholder").hidden = true;
+  if (!player){
+    player = new YT.Player("player", {
+      width:"100%", height:"100%", videoId:id,
+      playerVars:{rel:0, playsinline:1},
+      events:{ onReady:() => { playerReady = true; renderTimeline(); }, onStateChange:onState, onError:onErr }
+    });
+  } else player.cueVideoById(id);
+  const pct = coverage();
+  status(pct > 0.5
+    ? "This song is already learned, so chords will show right on time. Listening can stay off."
+    : "Turn on listening, then play. The first play-through teaches the page this song.");
+}
+function onState(e){
+  playing = e.data === YT.PlayerState.PLAYING;
+  skipUntil = performance.now() + 500;
+  if (!playing){ computeSegments(); saveSong(); }
+  renderTimeline();
+}
+function onErr(e){
+  const c = e.data;
+  if (c === 101 || c === 150) status("This video’s owner doesn’t allow it to play on other sites. Try another upload of the song, such as a lyric video or a cover.");
+  else if (c === 152 || c === 153) status("YouTube blocked the player because this page isn’t being served from a web address. Open it from its https:// link instead of as a file.");
+  else status("YouTube couldn’t play this video. Check the link or try another upload.");
+}
+$("loadBtn").addEventListener("click", loadVideo);
+$("url").addEventListener("keydown", e => { if (e.key === "Enter") loadVideo(); });
+
+// ---------- learned song storage ----------
+const songKey = id => "chordListener:song:" + id;
+function loadSong(id){
+  const m = new Map(), obj = store.get(songKey(id)) || {};
+  for (const k in obj){
+    const a = obj[k];
+    m.set(+k, {n:a[0], c:Float32Array.from(a.slice(1,13)), b:Float32Array.from(a.slice(13,25))});
+  }
+  return m;
+}
+function saveSong(){
+  if (!videoId || !needSave) return;
+  const obj = {};
+  slots.forEach((s,i) => { obj[i] = [s.n, ...Array.from(s.c, x=>+x.toFixed(3)), ...Array.from(s.b, x=>+x.toFixed(3))]; });
+  if (store.set(songKey(videoId), obj)) needSave = false;
+  else status("Your browser’s storage is full. Use Forget this song on songs you’re done with.");
+}
+function record(c, b){
+  const vt = player.getCurrentTime();
+  if (lastVT !== null && Math.abs(vt - lastVT) > 0.6) skipUntil = performance.now() + 500;  // a jump or seek
+  lastVT = vt;
+  if (performance.now() < skipUntil) return;
+  const t = vt - REC_LAT; if (t < 0) return;
+  const i = Math.floor(t / SLOT);
+  let s = slots.get(i);
+  if (!s){ s = {n:0, c:new Float32Array(12), b:new Float32Array(12)}; slots.set(i, s); }
+  s.n = Math.min(s.n + 1, 20);
+  const k = 1 / s.n;
+  for (let p=0; p<12; p++){ s.c[p] += (c[p]-s.c[p])*k; s.b[p] += (b[p]-s.b[p])*k; }
+  needSave = needCompute = true;
+}
+function computeSegments(){
+  const keys = [...slots.keys()].sort((a,b)=>a-b);
+  const picky = settings.picky / 100;
+  const runs = [];
+  for (const i of keys){
+    const c = new Float32Array(12), b = new Float32Array(12); let w = 0;
+    for (let d=-2; d<=2; d++){       // looks both behind and ahead, so no lag
+      const s = slots.get(i+d); if (!s) continue;
+      const wt = d === 0 ? 1.5 : 1;
+      for (let p=0; p<12; p++){ c[p] += s.c[p]*wt; b[p] += s.b[p]*wt; }
+      w += wt;
+    }
+    let sum = 0; for (let p=0; p<12; p++) sum += c[p];
+    let label;
+    if (sum / w < 0.3) label = "—";
+    else { const r = bestChord(c, b); label = r.score >= picky ? r.t.name : "N.C."; }
+    const last = runs[runs.length-1];
+    if (last && last.b === i-1 && last.label === label) last.b = i; else runs.push({a:i, b:i, label});
+  }
+  for (let k=0; k<runs.length; k++){   // absorb blips shorter than 0.6 s
+    const r = runs[k]; if (r.b - r.a + 1 >= 3) continue;
+    const prev = runs[k-1], next = runs[k+1];
+    if (prev && prev.b === r.a-1) r.label = prev.label;
+    else if (next && next.a === r.b+1) r.label = next.label;
+  }
+  segments = [];
+  for (const r of runs){
+    const start = r.a*SLOT, end = (r.b+1)*SLOT, last = segments[segments.length-1];
+    if (last && Math.abs(last.end - start) < 1e-6 && last.chord === r.label) last.end = end;
+    else segments.push({start, end, chord:r.label});
+  }
+  needCompute = false;
+  renderTimeline();
+}
+function duration(){ return (playerReady && player.getDuration && player.getDuration()) || 0; }
+function coverage(){ const d = duration(); return d ? Math.min(1, slots.size*SLOT/d) : (slots.size ? 1 : 0); }
+
+// ---------- timeline ----------
+function renderTimeline(){
+  const el = $("timeline"), dur = duration();
+  knownDur = dur;
+  el.querySelectorAll(".seg").forEach(n => n.remove());
+  if (dur){
+    let alt = false;
+    for (const s of segments){
+      if (s.chord === "—") continue;
+      const d = document.createElement("div");
+      d.className = "seg" + (s.chord === "N.C." ? " nc" : (alt = !alt) ? " alt" : "");
+      d.style.left = (s.start/dur*100) + "%";
+      d.style.width = ((s.end-s.start)/dur*100) + "%";
+      if (s.chord !== "N.C.") d.textContent = s.chord;
+      el.insertBefore(d, $("playhead"));
+    }
+  }
+  const pct = Math.round(coverage()*100);
+  $("coverage").textContent = !videoId ? "Learned chords will appear on this timeline."
+    : pct >= 98 ? "This song is fully learned." : `Learned ${pct}% of this song.`;
+}
+function seekFrac(f){ const d = duration(); if (d) player.seekTo(Math.max(0, Math.min(d, f*d)), true); }
+$("timeline").addEventListener("click", e => {
+  const r = e.currentTarget.getBoundingClientRect(); seekFrac((e.clientX - r.left) / r.width);
+});
+$("timeline").addEventListener("keydown", e => {
+  const d = duration(); if (!d) return;
+  if (e.key === "ArrowRight" || e.key === "ArrowLeft"){
+    e.preventDefault();
+    player.seekTo(player.getCurrentTime() + (e.key === "ArrowRight" ? 5 : -5), true);
+  }
+});
+
+// ---------- listening (captures this tab's audio) ----------
+async function startListening(){
+  try{
+    stream = await navigator.mediaDevices.getDisplayMedia({
+      video:true, audio:true, preferCurrentTab:true, selfBrowserSurface:"include", systemAudio:"exclude"
+    });
+  }catch(e){ stream = null; status("Sharing was cancelled or blocked. Click Turn on listening to try again."); return; }
+  if (!stream.getAudioTracks().length){
+    stream.getTracks().forEach(t=>t.stop()); stream = null;
+    status("No audio came through. When Chrome asks, choose this tab and turn on “Also share tab audio.”"); return;
+  }
+  ctx = new AudioContext();
+  const src = ctx.createMediaStreamSource(new MediaStream(stream.getAudioTracks()));
+  analyser = ctx.createAnalyser(); analyser.fftSize = 16384; analyser.smoothingTimeConstant = 0;
+  src.connect(analyser);
+  const n = analyser.frequencyBinCount;
+  binPc = new Int8Array(n).fill(-1); binBass = new Uint8Array(n); freq = new Float32Array(n);
+  for (let i=1; i<n; i++){
+    const f = i * ctx.sampleRate / analyser.fftSize;
+    if (f < 50 || f > 2100) continue;
+    const midi = 69 + 12*Math.log2(f/440), near = Math.round(midi);
+    if (Math.abs(midi-near) > 0.4) continue;
+    binPc[i] = ((near % 12) + 12) % 12;
+    binBass[i] = f < 260 ? 1 : 0;
+  }
+  stream.getTracks().forEach(t => t.addEventListener("ended", stopListening));
+  ema.fill(0); emaB.fill(0); liveCurrent = candidate = null; count = 0;
+  timer = setInterval(tick, 100);
+  $("listen").textContent = "Turn off listening";
+  status("Listening. Play the song all the way through once to teach the page its chords.");
+}
+function stopListening(){
+  clearInterval(timer); timer = null;
+  if (stream) stream.getTracks().forEach(t=>t.stop());
+  if (ctx) ctx.close();
+  stream = ctx = null;
+  computeSegments(); saveSong();
+  $("listen").textContent = "Turn on listening";
+  status("Listening is off. Learned parts of the song still show chords on time.");
+}
+$("listen").addEventListener("click", () => stream ? stopListening() : startListening());
+
+function tick(){
+  analyser.getFloatFrequencyData(freq);
+  const c = new Float32Array(12), b = new Float32Array(12);
+  let maxDb = -Infinity, sum = 0;
+  for (let i=0; i<freq.length; i++){
+    const pc = binPc[i]; if (pc < 0) continue;
+    const db = freq[i]; if (db > maxDb) maxDb = db;
+    if (db < -100) continue;
+    const mag = Math.pow(10, db/20);
+    c[pc] += mag; if (binBass[i]) b[pc] += mag; sum += mag;
+  }
+  const silent = maxDb < -75 || sum === 0;
+  if (silent){ c.fill(0); b.fill(0); }
+  else for (let p=0; p<12; p++){ c[p] /= sum; b[p] /= sum; }
+
+  if (playing && playerReady) record(c, b);
+
+  const a = 0.15;
+  for (let p=0; p<12; p++){ ema[p] = ema[p]*(1-a) + c[p]*a; emaB[p] = emaB[p]*(1-a) + b[p]*a; }
+  let label = "—"; liveConf = 0;
+  if (!silent){
+    const r = bestChord(ema, emaB);
+    liveConf = Math.max(0, Math.min(1, r.score));
+    label = r.score >= settings.picky/100 ? r.t.name : "N.C.";
+  }
+  if (label === candidate) count++; else { candidate = label; count = 1; }
+  if (count >= settings.steady && candidate !== liveCurrent){
+    liveCurrent = candidate;
+    if (liveCurrent !== "—" && liveCurrent !== "N.C."){
+      liveHistory.push(liveCurrent); if (liveHistory.length > 8) liveHistory.shift();
+      liveLog.push(`${playerReady ? fmt(player.getCurrentTime()) : ""}  ${liveCurrent}`);
+    }
+  }
+  const now = performance.now();
+  if (needCompute && now - lastCompute > 2000){ computeSegments(); lastCompute = now; }
+  if (needSave && now - lastSave > 5000){ saveSong(); lastSave = now; }
+}
+
+// ---------- display ----------
+function showChord(label){
+  if (label === shown) return; shown = label;
+  const el = $("chord");
+  el.classList.toggle("idle", label === "—" || label === "N.C.");
+  const m = label.match(/^([A-G][♯♭]?)(.*)$/);
+  el.innerHTML = "";
+  if (m){
+    el.append(m[1]);
+    if (m[2]){ const s = document.createElement("span"); s.className = "q"; s.textContent = m[2]; el.append(s); }
+  } else el.textContent = label;
+  const t = byName[label];
+  $("diagram").innerHTML = t ? chartSVG(t.voicing, label) : "";
+}
+function showBars(title, list){
+  const key = title + list.join("|"); if (key === barsKey) return; barsKey = key;
+  $("barsLabel").textContent = list.length ? title : "";
+  const ol = $("bars"); ol.innerHTML = "";
+  list.forEach(c => {
+    const li = document.createElement("li");
+    li.innerHTML = `<span>${c}</span>` + (byName[c] ? chartSVG(byName[c].voicing, c) : "");
+    ol.append(li);
+  });
+}
+function updateDisplay(){
+  let vt = null;
+  if (playerReady && player.getCurrentTime) vt = player.getCurrentTime();
+  const dur = duration();
+  if (dur && dur !== knownDur) renderTimeline();
+  if (vt !== null && dur) $("playhead").style.left = `calc(${vt/dur*100}% - 1px)`;
+
+  const t = vt !== null ? vt + settings.sync : null;
+  const idx = t !== null ? segments.findIndex(s => t >= s.start && t < s.end) : -1;
+  if (idx >= 0){
+    const cur = segments[idx];
+    showChord(cur.chord);
+    const up = [];
+    let firstStart = null;
+    for (let k=idx+1; k<segments.length && up.length<6; k++){
+      const c = segments[k].chord;
+      if (c === "—" || c === "N.C.") continue;
+      if ((up.length === 0 && c === cur.chord) || c === up[up.length-1]) continue;
+      if (firstStart === null) firstStart = segments[k].start;
+      up.push(c);
+    }
+    $("next").innerHTML = up.length ? `Next: <b>${up[0]}</b> in ${Math.max(0, firstStart - t).toFixed(1)}s` : "";
+    $("meter").hidden = true;
+    $("mode").textContent = "Showing learned chords, right on time.";
+    showBars("Coming up", up);
+  } else if (stream){
+    showChord(liveCurrent || "—");
+    $("next").textContent = "";
+    $("meter").hidden = false;
+    $("conf").style.width = (liveConf*100).toFixed(0) + "%";
+    $("mode").textContent = "Listening live, about 1 second behind. Play it again for on-time chords.";
+    showBars("Recent", liveHistory.slice());
+  } else {
+    showChord("—");
+    $("next").textContent = "";
+    $("meter").hidden = true;
+    $("mode").textContent = videoId ? "This part isn’t learned yet. Turn on listening and play it." : "";
+    showBars("", []);
+  }
+}
+setInterval(updateDisplay, 80);
+
+// ---------- buttons ----------
+$("copy").addEventListener("click", async () => {
+  const lines = segments.some(s => byName[s.chord])
+    ? segments.filter(s => byName[s.chord]).map(s => `${fmt(s.start)}  ${s.chord}`)
+    : liveLog;
+  if (!lines.length){ status("No chords yet. Play a song with listening on first."); return; }
+  try{ await navigator.clipboard.writeText(lines.join("\n")); status(`Copied ${lines.length} chord changes.`); }
+  catch(e){ status("Copy was blocked by the browser."); }
+});
+$("forget").addEventListener("click", () => {
+  if (!videoId){ status("Load a song first."); return; }
+  store.del(songKey(videoId)); slots = new Map(); needSave = false; computeSegments();
+  status("Forgot this song. Play it with listening on to learn it again.");
+});
+window.addEventListener("beforeunload", saveSong);
+if (!navigator.mediaDevices || !navigator.mediaDevices.getDisplayMedia){
+  status("This browser can’t listen to tab audio. Use Chrome or Edge on a computer. Learned songs still play with chords.");
+}
+</script>
+</body>
+</html>
