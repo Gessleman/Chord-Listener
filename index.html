@@ -148,8 +148,8 @@ label.check{flex-direction:row; align-items:center; gap:8px}
   <p id="status">Load a song, turn on listening, and play it once. After that, chords show right on time.</p>
 
   <footer>
-    <label>Steadiness (live listening only)
-      <input id="steady" type="range" min="2" max="15" value="6">
+    <label>Shortest chord (<span id="minVal">1.0</span>s)
+      <input id="minLen" type="range" min="0.4" max="2.4" step="0.2" value="1.0">
     </label>
     <label>Pickiness (higher = more “no chord”)
       <input id="picky" type="range" min="25" max="80" value="45">
@@ -311,7 +311,7 @@ const store = {
   set(k,v){ try{ localStorage.setItem(k, JSON.stringify(v)); return true; }catch(e){ return false; } },
   del(k){ try{ localStorage.removeItem(k); }catch(e){} }
 };
-const settings = Object.assign({steady:6, picky:45, sync:0}, store.get("chordListener:settings") || {});
+const settings = Object.assign({minLen:1.0, picky:45, sync:0}, store.get("chordListener:settings") || {});
 
 let player = null, playerReady = false, videoId = null, playing = false, knownDur = 0;
 let ctx = null, analyser, stream = null, timer = null, binPc, binBass, freq;
@@ -329,15 +329,21 @@ function fmt(t){ t = Math.max(0, Math.floor(t)); return `${Math.floor(t/60)}:${S
 
 // ---------- settings ----------
 function applySettings(){
-  $("steady").value = settings.steady; $("picky").value = settings.picky; $("sync").value = settings.sync;
+  $("minLen").value = settings.minLen; $("picky").value = settings.picky; $("sync").value = settings.sync;
   $("syncVal").textContent = (+settings.sync).toFixed(2);
+  $("minVal").textContent = (+settings.minLen).toFixed(1);
 }
 applySettings();
-["steady","picky","sync"].forEach(id => $(id).addEventListener("input", () => {
+["minLen","picky","sync"].forEach(id => $(id).addEventListener("input", () => {
   settings[id] = +$(id).value;
   $("syncVal").textContent = (+settings.sync).toFixed(2);
+  $("minVal").textContent = (+settings.minLen).toFixed(1);
   store.set("chordListener:settings", settings);
-  if (id === "picky") computeSegments();
+}));
+// re-run the heavier math only when a slider is let go
+["minLen","picky"].forEach(id => $(id).addEventListener("change", () => {
+  computeSegments();
+  if (meta.sheet && meta.aligned) lineUp(true);
 }));
 
 // ---------- YouTube player ----------
@@ -374,7 +380,7 @@ function loadVideo(){
 function onState(e){
   playing = e.data === YT.PlayerState.PLAYING;
   skipUntil = performance.now() + 500;
-  if (!playing){ computeSegments(); saveSong(); if (needAlign && meta.sheet && meta.aligned) lineUp(true); }
+  if (!playing){ computeSegments(); saveSong(); if (needAlign && meta.sheet && coverage() >= 0.9) lineUp(true); }
   renderTimeline();
 }
 function onErr(e){
@@ -387,7 +393,7 @@ $("loadBtn").addEventListener("click", loadVideo);
 $("url").addEventListener("keydown", e => { if (e.key === "Enter") loadVideo(); });
 
 // ---------- learned song storage ----------
-const songKey = id => "chordListener:song:" + id;
+const songKey = id => "chordListener:song2:" + id;   // v2: new listening math, so older data is set aside
 function loadSong(id){
   const m = new Map(), obj = store.get(songKey(id)) || {};
   for (const k in obj){
@@ -417,38 +423,78 @@ function record(c, b){
   for (let p=0; p<12; p++){ s.c[p] += (c[p]-s.c[p])*k; s.b[p] += (b[p]-s.b[p])*k; }
   needSave = needCompute = needAlign = true;
 }
+// Average a slot with its neighbors and normalize it for matching.
+function slotVec(i){
+  const c = new Float32Array(12), b = new Float32Array(12); let w = 0;
+  for (let d=-1; d<=1; d++){
+    const s = slots.get(i+d); if (!s) continue;
+    const wt = d === 0 ? 2 : 1;
+    for (let p=0; p<12; p++){ c[p] += s.c[p]*wt; b[p] += s.b[p]*wt; }
+    w += wt;
+  }
+  let sum = 0; for (let p=0; p<12; p++) sum += c[p];
+  return (!w || sum/w < 0.3) ? null : {v:center(Array.from(c)), b, bmax:Math.max(...b) || 1};
+}
+const minSlots = () => Math.max(2, Math.round(settings.minLen / SLOT));
+
+// Pick the best chord path through the whole song at once. Every chord must
+// last at least "Shortest chord", and each change costs a little, so the
+// page follows the harmony instead of chasing individual melody notes.
 function computeSegments(){
-  const keys = [...slots.keys()].sort((a,b)=>a-b);
+  segments = []; needCompute = false;
+  const keys = [...slots.keys()];
+  if (!keys.length){ renderTimeline(); return; }
+  const T0 = Math.min(...keys), T = Math.max(...keys) + 1 - T0;
+  const NC = templates.length, SIL = NC + 1, C = NC + 2, M = minSlots(), SW = 0.2;
   const picky = settings.picky / 100;
-  const runs = [];
-  for (const i of keys){
-    const c = new Float32Array(12), b = new Float32Array(12); let w = 0;
-    for (let d=-2; d<=2; d++){       // looks both behind and ahead, so no lag
-      const s = slots.get(i+d); if (!s) continue;
-      const wt = d === 0 ? 1.5 : 1;
-      for (let p=0; p<12; p++){ c[p] += s.c[p]*wt; b[p] += s.b[p]*wt; }
-      w += wt;
+  const E = new Float32Array(T*C);
+  for (let t=0; t<T; t++){
+    const sv = slotVec(T0+t), o = t*C;
+    if (!sv){ E[o+SIL] = 0.5; continue; }
+    for (let c=0; c<NC; c++){
+      const tp = templates[c]; let d = 0;
+      for (let q=0; q<12; q++) d += sv.v[q]*tp.vec[q];
+      E[o+c] = d*tp.bias + 0.12*(sv.b[tp.root]/sv.bmax);
     }
-    let sum = 0; for (let p=0; p<12; p++) sum += c[p];
-    let label;
-    if (sum / w < 0.3) label = "—";
-    else { const r = bestChord(c, b); label = r.score >= picky ? r.t.name : "N.C."; }
-    const last = runs[runs.length-1];
-    if (last && last.b === i-1 && last.label === label) last.b = i; else runs.push({a:i, b:i, label});
+    E[o+NC] = picky; E[o+SIL] = -0.5;
   }
-  for (let k=0; k<runs.length; k++){   // absorb blips shorter than 0.6 s
-    const r = runs[k]; if (r.b - r.a + 1 >= 3) continue;
-    const prev = runs[k-1], next = runs[k+1];
-    if (prev && prev.b === r.a-1) r.label = prev.label;
-    else if (next && next.a === r.b+1) r.label = next.label;
+  const S = C*M, back = new Uint8Array(T*S);
+  let D = new Float64Array(S).fill(-Infinity);
+  for (let c=0; c<C; c++) D[c*M] = E[c];
+  for (let t=1; t<T; t++){
+    let b1 = -Infinity, c1 = -1, b2 = -Infinity, c2 = -1;
+    for (let c=0; c<C; c++){
+      const v = D[c*M+M-1];
+      if (v > b1){ b2 = b1; c2 = c1; b1 = v; c1 = c; } else if (v > b2){ b2 = v; c2 = c; }
+    }
+    const nd = new Float64Array(S), o = t*C, bo = t*S;
+    for (let c=0; c<C; c++){
+      const base = c*M, e = E[o+c];
+      if (c !== c1){ nd[base] = b1 - SW + e; back[bo+base] = Math.max(c1, 0); }
+      else { nd[base] = b2 - SW + e; back[bo+base] = Math.max(c2, 0); }
+      for (let j=1; j<M; j++) nd[base+j] = D[base+j-1] + e;
+      if (D[base+M-1] + e > nd[base+M-1]){ nd[base+M-1] = D[base+M-1] + e; back[bo+base+M-1] = 255; }
+      else back[bo+base+M-1] = 254;
+    }
+    D = nd;
   }
-  segments = [];
-  for (const r of runs){
-    const start = r.a*SLOT, end = (r.b+1)*SLOT, last = segments[segments.length-1];
-    if (last && Math.abs(last.end - start) < 1e-6 && last.chord === r.label) last.end = end;
-    else segments.push({start, end, chord:r.label});
+  let st = 0, bv = -Infinity;
+  for (let k=0; k<S; k++) if (D[k] > bv){ bv = D[k]; st = k; }
+  let c = Math.floor(st/M), j = st % M;
+  const lab = new Int16Array(T);
+  for (let t=T-1; t>=0; t--){
+    lab[t] = c;
+    if (t === 0) break;
+    const code = back[t*S + c*M + j];
+    if (j === 0){ c = code; j = M-1; }
+    else if (!(j === M-1 && code === 255)) j -= 1;
   }
-  needCompute = false;
+  for (let t=0; t<T; t++){
+    const name = lab[t] === NC ? "N.C." : lab[t] === SIL ? "—" : templates[lab[t]].name;
+    const start = (T0+t)*SLOT, last = segments[segments.length-1];
+    if (last && last.chord === name && Math.abs(last.end - start) < 1e-6) last.end = start + SLOT;
+    else segments.push({start, end:start+SLOT, chord:name});
+  }
   renderTimeline();
 }
 function duration(){ return (playerReady && player.getDuration && player.getDuration()) || 0; }
@@ -459,6 +505,7 @@ const metaKey = id => "chordListener:meta:" + id;
 function loadMeta(id){
   meta = Object.assign({capo:0, sheet:"", aligned:null}, store.get(metaKey(id)) || {});
   $("capo").value = meta.capo; $("sheetText").value = meta.sheet;
+  if (!slots.size) meta.aligned = null;
   sheetSegs = meta.aligned ? meta.aligned.segs : [];
   if (meta.sheet) $("sheetPanel").hidden = false;
 }
@@ -471,48 +518,48 @@ function capoName(label){
 // Line the sheet's chord order up against what was heard, trying all 12 keys.
 function align(seq){
   const keys = [...slots.keys()]; if (!keys.length) return null;
-  const T = Math.max(...keys) + 1, N = seq.length, P = N + 2;
-  const vec = new Array(T);
-  for (let t=0; t<T; t++){
-    const c = new Float32Array(12), b = new Float32Array(12); let w = 0;
-    for (let d=-1; d<=1; d++){
-      const s = slots.get(t+d); if (!s) continue;
-      const wt = d === 0 ? 2 : 1;
-      for (let p=0; p<12; p++){ c[p] += s.c[p]*wt; b[p] += s.b[p]*wt; }
-      w += wt;
-    }
-    let sum = 0; for (let p=0; p<12; p++) sum += c[p];
-    vec[t] = (!w || sum/w < 0.3) ? null : {v:center(Array.from(c)), b, bmax:Math.max(...b) || 1};
-  }
+  const T = Math.max(...keys) + 1, N = seq.length, M = minSlots(), S = N*M + 2, POST = S - 1, NP = N + 2;
+  const vec = new Array(T); for (let t=0; t<T; t++) vec[t] = slotVec(t);
   const PEN = 0.3, SKIP = 1.5, EDGE = 0.15;
+  const posOf = s => s === 0 ? 0 : s === POST ? N+1 : Math.floor((s-1)/M) + 1;
   let best = null;
   for (let k=0; k<12; k++){
     const tv = seq.map(c => { const t = new Array(12).fill(0); c.iv.forEach((x,i) => { t[(c.root+k+x)%12] += i===0 ? 1.5 : 1; }); return center(t); });
-    const em = (t, p) => {
-      const s = vec[t], edge = p === 0 || p === N+1;
-      if (!s) return edge ? EDGE : 0;   // silence belongs before or after the song
-      if (edge) return EDGE;
-      const v = tv[p-1]; let d = 0; for (let q=0; q<12; q++) d += s.v[q]*v[q];
-      return d + 0.12*(s.b[(seq[p-1].bass+k)%12]/s.bmax);
-    };
-    let D = new Float64Array(P).fill(-Infinity); D[0] = em(0,0); D[1] = em(0,1);
-    const back = new Uint8Array(P*T);
+    const E = new Float32Array(T*NP);
+    for (let t=0; t<T; t++){
+      const sv = vec[t], o = t*NP;
+      E[o] = E[o+N+1] = EDGE;               // before / after the sheet
+      if (!sv) continue;                     // silence: no chord is favored
+      for (let p=1; p<=N; p++){
+        const v = tv[p-1]; let d = 0; for (let q=0; q<12; q++) d += sv.v[q]*v[q];
+        E[o+p] = d + 0.12*(sv.b[(seq[p-1].bass+k)%12]/sv.bmax);
+      }
+    }
+    let D = new Float64Array(S).fill(-Infinity); D[0] = E[0]; D[1] = E[1];
+    const back = new Uint8Array(T*S);
     for (let t=1; t<T; t++){
-      const nd = new Float64Array(P);
-      for (let p=0; p<P; p++){
-        let bv = D[p], ch = 0;
-        if (p >= 1 && D[p-1] - PEN > bv){ bv = D[p-1] - PEN; ch = 1; }
-        if (p >= 2 && D[p-2] - SKIP > bv){ bv = D[p-2] - SKIP; ch = 2; }
-        nd[p] = bv + em(t,p); back[t*P+p] = ch;
+      const nd = new Float64Array(S), o = t*NP, bo = t*S;
+      for (let s=0; s<S; s++){
+        const edge = s === 0 || s === POST, j = edge ? -1 : (s-1) % M;
+        let bv = (edge || j === M-1) ? D[s] : -Infinity, code = 0;
+        if (s > 0){
+          const pen = (j === 0 || s === POST) ? PEN : 0;
+          if (D[s-1] - pen > bv){ bv = D[s-1] - pen; code = 1; }
+          if ((j === 0 || s === POST) && s-M-1 >= 0 && D[s-M-1] - SKIP > bv){ bv = D[s-M-1] - SKIP; code = 2; }
+        }
+        nd[s] = bv + E[o + posOf(s)]; back[bo+s] = code;
       }
       D = nd;
     }
-    const endP = D[N+1] >= D[N] ? N+1 : N;
-    if (!best || D[endP] > best.score) best = {k, score:D[endP], back, endP};
+    const endS = D[POST] >= D[S-2] ? POST : S-2;
+    if (!best || D[endS] > best.score) best = {k, score:D[endS], back, endS};
   }
-  const {k, back, endP} = best;
-  const assign = new Int32Array(T); let p = endP;
-  for (let t=T-1; t>=0; t--){ assign[t] = p; if (t > 0) p -= back[t*P+p]; }
+  const {k, back, endS} = best;
+  const assign = new Int32Array(T); let st = endS;
+  for (let t=T-1; t>=0; t--){
+    assign[t] = posOf(st);
+    if (t > 0){ const code = back[t*S+st]; st -= code === 0 ? 0 : code === 1 ? 1 : M+1; }
+  }
   const segs = [];
   for (let t=0; t<T; t++){
     const q = assign[t]; if (q < 1 || q > N) continue;
@@ -643,7 +690,7 @@ function tick(){
     const pc = binPc[i]; if (pc < 0) continue;
     const db = freq[i]; if (db > maxDb) maxDb = db;
     if (db < -100) continue;
-    const mag = Math.pow(10, db/20);
+    const mag = Math.pow(10, db/40);   // square-root loudness, so one loud sung note can’t drown out the chord
     c[pc] += mag; if (binBass[i]) b[pc] += mag; sum += mag;
   }
   const silent = maxDb < -75 || sum === 0;
@@ -661,7 +708,7 @@ function tick(){
     label = r.score >= settings.picky/100 ? r.t.name : "N.C.";
   }
   if (label === candidate) count++; else { candidate = label; count = 1; }
-  if (count >= settings.steady && candidate !== liveCurrent){
+  if (count >= Math.max(2, Math.min(6, Math.round(settings.minLen*5))) && candidate !== liveCurrent){
     liveCurrent = candidate;
     if (liveCurrent !== "—" && liveCurrent !== "N.C."){
       liveHistory.push(liveCurrent); if (liveHistory.length > 8) liveHistory.shift();
