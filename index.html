@@ -89,6 +89,15 @@ input[type=range]{width:170px; accent-color:var(--accent)}
 .chart .open{fill:none; stroke:var(--muted); stroke-width:1.4}
 .chart .mark{fill:var(--muted); font:600 11px "Segoe UI",system-ui,sans-serif; text-anchor:middle}
 .chart .pos{fill:var(--ink); font:700 16px "Segoe UI",system-ui,sans-serif; text-anchor:end}
+#section{margin:0; color:var(--accent); font-weight:600; letter-spacing:.06em; text-transform:uppercase; font-size:.85rem; min-height:1.2em}
+.sheet{background:var(--surface); border:1px solid var(--line); border-radius:14px; padding:16px 20px; display:flex; flex-direction:column; gap:12px}
+.sheet[hidden]{display:none}
+.sheet p{margin:0; color:var(--muted); line-height:1.5}
+.sheet textarea{font:14px/1.5 Consolas,"Courier New",monospace; width:100%; min-height:220px; resize:vertical; padding:10px 12px;
+  border-radius:10px; border:2px solid var(--line); background:var(--bg); color:var(--ink)}
+.sheet .row{display:flex; gap:10px 14px; flex-wrap:wrap; align-items:center}
+select{font:inherit; padding:.35em .6em; border-radius:8px; border:2px solid var(--line); background:var(--bg); color:var(--ink)}
+label.check{flex-direction:row; align-items:center; gap:8px}
 @media (prefers-reduced-motion: reduce){.meter span{transition:none}}
 </style>
 </head>
@@ -100,6 +109,7 @@ input[type=range]{width:170px; accent-color:var(--accent)}
       <input id="url" type="text" placeholder="Paste a YouTube link" aria-label="YouTube link">
       <button id="loadBtn" class="quiet">Load song</button>
     </div>
+    <button id="sheetBtn" class="quiet">Chord sheet</button>
     <button id="listen">Turn on listening</button>
   </header>
 
@@ -109,6 +119,7 @@ input[type=range]{width:170px; accent-color:var(--accent)}
       <div id="player"></div>
     </div>
     <div class="now">
+      <p id="section"></p>
       <div class="now-row">
         <p id="chord" class="display idle">—</p>
         <div id="diagram"></div>
@@ -121,6 +132,15 @@ input[type=range]{width:170px; accent-color:var(--accent)}
 
   <div class="timeline" id="timeline" tabindex="0" aria-label="Song timeline. Click to jump. Left and right arrows skip 5 seconds."><div id="playhead"></div></div>
   <div class="under"><span id="coverage">Learned chords will appear on this timeline.</span><span>Click the timeline to jump</span></div>
+
+  <section class="sheet" id="sheetPanel" hidden>
+    <p>Paste the chord sheet from Ultimate Guitar here. Lyrics and section labels can come along; the page only reads the chord lines. Play the song through once with listening on, then click Line up chords.</p>
+    <textarea id="sheetText" spellcheck="false" aria-label="Chord sheet" placeholder="[Intro]&#10;Em  G  A  x4&#10;&#10;[Verse 1]&#10;Em   G   A   Em&#10;..."></textarea>
+    <div class="row">
+      <button id="alignBtn">Line up chords</button>
+      <button id="clearSheet" class="quiet">Remove sheet</button>
+    </div>
+  </section>
 
   <p id="barsLabel"></p>
   <ol id="bars" class="display" aria-live="off"></ol>
@@ -137,6 +157,14 @@ input[type=range]{width:170px; accent-color:var(--accent)}
     <label>Timing nudge (<span id="syncVal">0.00</span>s)
       <input id="sync" type="range" min="-0.6" max="0.6" step="0.05" value="0">
     </label>
+    <label>Capo
+      <select id="capo">
+        <option value="0">No capo</option><option value="1">1st fret</option><option value="2">2nd fret</option>
+        <option value="3">3rd fret</option><option value="4">4th fret</option><option value="5">5th fret</option>
+        <option value="6">6th fret</option><option value="7">7th fret</option>
+      </select>
+    </label>
+    <label class="check"><input type="checkbox" id="useSheet" checked> Show chord sheet</label>
     <button id="copy" class="quiet">Copy chords</button>
     <button id="forget" class="quiet">Forget this song</button>
   </footer>
@@ -198,6 +226,70 @@ for (let r=0; r<12; r++){
   }
 }
 const byName = Object.fromEntries(templates.map(t => [t.name, t]));
+
+// ---------- chord sheet parsing ----------
+const QMAP = {
+  "":[0,4,7], "maj":[0,4,7], "M":[0,4,7],
+  "m":[0,3,7], "min":[0,3,7], "-":[0,3,7],
+  "7":[0,4,7,10], "9":[0,4,7,10,2], "11":[0,4,7,10,5], "13":[0,4,7,10,9],
+  "m7":[0,3,7,10], "min7":[0,3,7,10], "-7":[0,3,7,10], "m9":[0,3,7,10,2], "m11":[0,3,7,10,5],
+  "maj7":[0,4,7,11], "M7":[0,4,7,11], "maj9":[0,4,7,11,2],
+  "sus2":[0,2,7], "2":[0,2,7], "sus4":[0,5,7], "sus":[0,5,7], "4":[0,5,7], "7sus4":[0,5,7,10], "7sus":[0,5,7,10],
+  "dim":[0,3,6], "°":[0,3,6], "dim7":[0,3,6,9], "m7b5":[0,3,6,10],
+  "aug":[0,4,8], "+":[0,4,8], "6":[0,4,7,9], "m6":[0,3,7,9],
+  "add9":[0,2,4,7], "add2":[0,2,4,7], "madd9":[0,2,3,7], "5":[0,7]
+};
+const LETTER = {C:0, D:2, E:4, F:5, G:7, A:9, B:11};
+const CHORD_RE = /^\(?([A-G])([#b♯♭]?)([^\s\/()]*)(?:\/([A-G])([#b♯♭]?))?\)?$/;
+const acc = a => (a === "#" || a === "♯") ? 1 : (a === "b" || a === "♭") ? -1 : 0;
+function chartQ(q){
+  if (/^(m|min|-)(?!aj)/.test(q)) return (/7|9|11/.test(q) && !/b5/.test(q)) ? "m7" : "m";
+  if (/^(maj|M)(7|9)/.test(q)) return "maj7";
+  if (/^(dim|°)/.test(q)) return "m";
+  if (/^(7|9|11|13)/.test(q)) return "7";
+  return "";
+}
+function parseChord(tok){
+  const m = tok.match(CHORD_RE); if (!m || !(m[3] in QMAP)) return null;
+  const root = (LETTER[m[1]] + acc(m[2]) + 12) % 12;
+  const bass = m[4] ? (LETTER[m[4]] + acc(m[5]) + 12) % 12 : root;
+  const name = tok.replace(/[()]/g, "").replace(/#/g, "♯").replace(/([A-G])b/g, "$1♭");
+  return {name, root, bass, iv:QMAP[m[3]], chartQ:chartQ(m[3])};
+}
+function parseSheet(text){
+  const seq = []; let section = "";
+  const cm = text.match(/capo[^\n\d]{0,15}(\d{1,2})/i);
+  for (const raw of text.split(/\r?\n/)){
+    const line = raw.trim(); if (!line) continue;
+    const h = line.match(/^\[(.+?)\]$/); if (h){ section = h[1]; continue; }
+    const toks = line.split(/\s+/).filter(t => t && !/^[|\/\-–:]+$/.test(t));
+    const chords = []; let rep = 1, ok = toks.length > 0;
+    for (const t of toks){
+      const r = t.match(/^\(?[x×](\d+)\)?$|^\(?(\d+)[x×]\)?$/i);
+      if (r){ rep = +(r[1] || r[2]); continue; }
+      if (/^N\.?C\.?$/i.test(t)) continue;
+      const c = parseChord(t); if (!c){ ok = false; break; }
+      chords.push(c);
+    }
+    if (!ok || !chords.length) continue;
+    for (let k=0; k<rep; k++) chords.forEach(c => {
+      const last = seq[seq.length-1];
+      if (!last || last.name !== c.name) seq.push(Object.assign({section}, c));
+    });
+  }
+  return {seq, capo: cm ? +cm[1] : null};
+}
+// common shapes that aren't plain triads or 7ths
+const EXTRA = {
+  "Asus2":[-1,0,2,2,0,0], "Asus4":[-1,0,2,2,3,0], "Dsus2":[-1,-1,0,2,3,0], "Dsus4":[-1,-1,0,2,3,3],
+  "Esus4":[0,2,2,2,0,0], "Cadd9":[-1,3,2,0,3,0], "G/B":[-1,2,0,0,0,3], "D/F♯":[2,-1,0,2,3,2],
+  "C/G":[3,3,2,0,1,0], "C/B":[-1,2,2,0,1,0]
+};
+function chartFor(name){
+  if (EXTRA[name]) return chartSVG({frets:EXTRA[name], barre:0, from:0}, name);
+  const c = parseChord(name); if (!c) return "";
+  return chartSVG(voicing(c.root, c.chartQ), name);
+}
 function bestChord(c, b){
   const v = center(Array.from(c));
   const bmax = Math.max(...b) || 1;
@@ -230,6 +322,7 @@ let slots = new Map(), segments = [];
 let needSave = false, needCompute = false, lastSave = 0, lastCompute = 0;
 let lastVT = null, skipUntil = 0;
 let shown = null, barsKey = "";
+let meta = {capo:0, sheet:"", aligned:null}, sheetSegs = [], needAlign = false;
 
 function status(t){ $("status").textContent = t; }
 function fmt(t){ t = Math.max(0, Math.floor(t)); return `${Math.floor(t/60)}:${String(t%60).padStart(2,"0")}`; }
@@ -263,6 +356,7 @@ function loadVideo(){
   if (!window.YT || !YT.Player){ status("The YouTube player is still loading. Try again in a moment."); return; }
   saveSong();
   videoId = id; slots = loadSong(id); knownDur = 0; lastVT = null;
+  loadMeta(id);
   computeSegments();
   $("placeholder").hidden = true;
   if (!player){
@@ -280,7 +374,7 @@ function loadVideo(){
 function onState(e){
   playing = e.data === YT.PlayerState.PLAYING;
   skipUntil = performance.now() + 500;
-  if (!playing){ computeSegments(); saveSong(); }
+  if (!playing){ computeSegments(); saveSong(); if (needAlign && meta.sheet && meta.aligned) lineUp(true); }
   renderTimeline();
 }
 function onErr(e){
@@ -321,7 +415,7 @@ function record(c, b){
   s.n = Math.min(s.n + 1, 20);
   const k = 1 / s.n;
   for (let p=0; p<12; p++){ s.c[p] += (c[p]-s.c[p])*k; s.b[p] += (b[p]-s.b[p])*k; }
-  needSave = needCompute = true;
+  needSave = needCompute = needAlign = true;
 }
 function computeSegments(){
   const keys = [...slots.keys()].sort((a,b)=>a-b);
@@ -360,6 +454,110 @@ function computeSegments(){
 function duration(){ return (playerReady && player.getDuration && player.getDuration()) || 0; }
 function coverage(){ const d = duration(); return d ? Math.min(1, slots.size*SLOT/d) : (slots.size ? 1 : 0); }
 
+// ---------- per-song settings and chord sheet ----------
+const metaKey = id => "chordListener:meta:" + id;
+function loadMeta(id){
+  meta = Object.assign({capo:0, sheet:"", aligned:null}, store.get(metaKey(id)) || {});
+  $("capo").value = meta.capo; $("sheetText").value = meta.sheet;
+  sheetSegs = meta.aligned ? meta.aligned.segs : [];
+  if (meta.sheet) $("sheetPanel").hidden = false;
+}
+function saveMeta(){ if (videoId) store.set(metaKey(videoId), meta); }
+function capoName(label){
+  const t = byName[label]; const capo = +meta.capo || 0;
+  return (!t || !capo) ? label : NOTES[(t.root - capo + 12) % 12] + t.q;
+}
+
+// Line the sheet's chord order up against what was heard, trying all 12 keys.
+function align(seq){
+  const keys = [...slots.keys()]; if (!keys.length) return null;
+  const T = Math.max(...keys) + 1, N = seq.length, P = N + 2;
+  const vec = new Array(T);
+  for (let t=0; t<T; t++){
+    const c = new Float32Array(12), b = new Float32Array(12); let w = 0;
+    for (let d=-1; d<=1; d++){
+      const s = slots.get(t+d); if (!s) continue;
+      const wt = d === 0 ? 2 : 1;
+      for (let p=0; p<12; p++){ c[p] += s.c[p]*wt; b[p] += s.b[p]*wt; }
+      w += wt;
+    }
+    let sum = 0; for (let p=0; p<12; p++) sum += c[p];
+    vec[t] = (!w || sum/w < 0.3) ? null : {v:center(Array.from(c)), b, bmax:Math.max(...b) || 1};
+  }
+  const PEN = 0.3, SKIP = 1.5, EDGE = 0.15;
+  let best = null;
+  for (let k=0; k<12; k++){
+    const tv = seq.map(c => { const t = new Array(12).fill(0); c.iv.forEach((x,i) => { t[(c.root+k+x)%12] += i===0 ? 1.5 : 1; }); return center(t); });
+    const em = (t, p) => {
+      const s = vec[t], edge = p === 0 || p === N+1;
+      if (!s) return edge ? EDGE : 0;   // silence belongs before or after the song
+      if (edge) return EDGE;
+      const v = tv[p-1]; let d = 0; for (let q=0; q<12; q++) d += s.v[q]*v[q];
+      return d + 0.12*(s.b[(seq[p-1].bass+k)%12]/s.bmax);
+    };
+    let D = new Float64Array(P).fill(-Infinity); D[0] = em(0,0); D[1] = em(0,1);
+    const back = new Uint8Array(P*T);
+    for (let t=1; t<T; t++){
+      const nd = new Float64Array(P);
+      for (let p=0; p<P; p++){
+        let bv = D[p], ch = 0;
+        if (p >= 1 && D[p-1] - PEN > bv){ bv = D[p-1] - PEN; ch = 1; }
+        if (p >= 2 && D[p-2] - SKIP > bv){ bv = D[p-2] - SKIP; ch = 2; }
+        nd[p] = bv + em(t,p); back[t*P+p] = ch;
+      }
+      D = nd;
+    }
+    const endP = D[N+1] >= D[N] ? N+1 : N;
+    if (!best || D[endP] > best.score) best = {k, score:D[endP], back, endP};
+  }
+  const {k, back, endP} = best;
+  const assign = new Int32Array(T); let p = endP;
+  for (let t=T-1; t>=0; t--){ assign[t] = p; if (t > 0) p -= back[t*P+p]; }
+  const segs = [];
+  for (let t=0; t<T; t++){
+    const q = assign[t]; if (q < 1 || q > N) continue;
+    const last = segs[segs.length-1];
+    if (last && last.i === q-1 && Math.abs(last.end - t*SLOT) < 1e-6) last.end = (t+1)*SLOT;
+    else segs.push({i:q-1, start:t*SLOT, end:(t+1)*SLOT, chord:seq[q-1].name, section:seq[q-1].section});
+  }
+  // back-check: how often did the listener's own guesses agree with the sheet?
+  let agree = 0, total = 0;
+  for (const sg of segs){
+    const c = seq[sg.i], root = (c.root + k) % 12, minor = c.chartQ.startsWith("m");
+    for (let t = Math.round(sg.start/SLOT); t < Math.round(sg.end/SLOT); t++){
+      const L = segments.find(s => (t+0.5)*SLOT >= s.start && (t+0.5)*SLOT < s.end);
+      const tpl = L && byName[L.chord]; if (!tpl) continue;
+      total++; if (tpl.root === root && tpl.q.startsWith("m") === minor) agree++;
+    }
+  }
+  return {k, segs, agree: total ? Math.round(agree/total*100) : 0};
+}
+function lineUp(quiet){
+  meta.sheet = $("sheetText").value;
+  const parsed = parseSheet(meta.sheet);
+  if (!parsed.seq.length){ if (!quiet) status("I couldn’t find any chord lines in that text. Paste the whole sheet, including the lines with chords."); saveMeta(); return; }
+  const cov = coverage();
+  if (cov < 0.5){
+    saveMeta();
+    if (!quiet) status(`The page needs to hear the song first (${Math.round(cov*100)}% learned). Turn on listening, play it through once, then click Line up chords.`);
+    return;
+  }
+  computeSegments();
+  const r = align(parsed.seq); if (!r) return;
+  meta.aligned = {k:r.k, segs:r.segs}; sheetSegs = r.segs; needAlign = false;
+  if (r.k <= 7){ meta.capo = r.k; $("capo").value = r.k; }
+  saveMeta(); renderTimeline();
+  if (quiet) return;
+  let msg = `Lined up ${parsed.seq.length} chord changes from your sheet. `;
+  if (r.k === 0) msg += "The recording is in the same key as the sheet. ";
+  else if (r.k <= 7) msg += `The recording matches the sheet played with capo ${r.k}. `;
+  else msg += `The recording sounds ${12-r.k} half step${12-r.k > 1 ? "s" : ""} lower than the sheet, so it may be tuned down. `;
+  if (parsed.capo !== null && parsed.capo !== r.k) msg += `(The sheet says capo ${parsed.capo}.) `;
+  msg += `The listener’s own chord guesses agreed with the sheet ${r.agree}% of the time.`;
+  if (r.agree < 35) msg += " That’s low, so this video may be a different version or key than the sheet.";
+  status(msg);
+}
+
 // ---------- timeline ----------
 function renderTimeline(){
   const el = $("timeline"), dur = duration();
@@ -367,7 +565,9 @@ function renderTimeline(){
   el.querySelectorAll(".seg").forEach(n => n.remove());
   if (dur){
     let alt = false;
-    for (const s of segments){
+    const list = ($("useSheet").checked && sheetSegs.length) ? sheetSegs
+      : segments.map(s => ({start:s.start, end:s.end, chord:capoName(s.chord)}));
+    for (const s of list){
       if (s.chord === "—") continue;
       const d = document.createElement("div");
       d.className = "seg" + (s.chord === "N.C." ? " nc" : (alt = !alt) ? " alt" : "");
@@ -484,8 +684,7 @@ function showChord(label){
     el.append(m[1]);
     if (m[2]){ const s = document.createElement("span"); s.className = "q"; s.textContent = m[2]; el.append(s); }
   } else el.textContent = label;
-  const t = byName[label];
-  $("diagram").innerHTML = t ? chartSVG(t.voicing, label) : "";
+  $("diagram").innerHTML = chartFor(label);
 }
 function showBars(title, list){
   const key = title + list.join("|"); if (key === barsKey) return; barsKey = key;
@@ -493,9 +692,23 @@ function showBars(title, list){
   const ol = $("bars"); ol.innerHTML = "";
   list.forEach(c => {
     const li = document.createElement("li");
-    li.innerHTML = `<span>${c}</span>` + (byName[c] ? chartSVG(byName[c].voicing, c) : "");
+    li.innerHTML = `<span>${c}</span>` + chartFor(c);
     ol.append(li);
   });
+}
+function upcoming(list, from, current){
+  const up = []; let firstStart = null;
+  for (let k=from; k<list.length && up.length<6; k++){
+    const c = list[k].chord;
+    if (c === "—" || c === "N.C.") continue;
+    if ((up.length === 0 && c === current) || c === up[up.length-1]) continue;
+    if (firstStart === null) firstStart = list[k].start;
+    up.push(c);
+  }
+  return {up, firstStart};
+}
+function showNext(up, firstStart, t){
+  $("next").innerHTML = up.length ? `Next: <b>${up[0]}</b> in ${Math.max(0, firstStart - t).toFixed(1)}s` : "";
 }
 function updateDisplay(){
   let vt = null;
@@ -503,32 +716,43 @@ function updateDisplay(){
   const dur = duration();
   if (dur && dur !== knownDur) renderTimeline();
   if (vt !== null && dur) $("playhead").style.left = `calc(${vt/dur*100}% - 1px)`;
-
   const t = vt !== null ? vt + settings.sync : null;
+
+  // 1) a chord sheet lined up to the song
+  if ($("useSheet").checked && sheetSegs.length && t !== null){
+    const i = sheetSegs.findIndex(s => t >= s.start && t < s.end);
+    const cur = i >= 0 ? sheetSegs[i] : null;
+    const from = i >= 0 ? i+1 : sheetSegs.findIndex(s => s.start > t);
+    showChord(cur ? cur.chord : "—");
+    $("section").textContent = cur ? cur.section : (from >= 0 ? sheetSegs[from].section : "");
+    const {up, firstStart} = from >= 0 ? upcoming(sheetSegs, from, cur && cur.chord) : {up:[], firstStart:null};
+    showNext(up, firstStart, t);
+    $("meter").hidden = true;
+    $("mode").textContent = "Showing your chord sheet, lined up to the song.";
+    showBars("Coming up", up);
+    return;
+  }
+  $("section").textContent = "";
+
+  // 2) chords the page learned by listening
   const idx = t !== null ? segments.findIndex(s => t >= s.start && t < s.end) : -1;
   if (idx >= 0){
-    const cur = segments[idx];
-    showChord(cur.chord);
-    const up = [];
-    let firstStart = null;
-    for (let k=idx+1; k<segments.length && up.length<6; k++){
-      const c = segments[k].chord;
-      if (c === "—" || c === "N.C.") continue;
-      if ((up.length === 0 && c === cur.chord) || c === up[up.length-1]) continue;
-      if (firstStart === null) firstStart = segments[k].start;
-      up.push(c);
-    }
-    $("next").innerHTML = up.length ? `Next: <b>${up[0]}</b> in ${Math.max(0, firstStart - t).toFixed(1)}s` : "";
+    const list = segments.map(s => ({start:s.start, chord:capoName(s.chord)}));
+    const cur = list[idx].chord;
+    showChord(cur);
+    const {up, firstStart} = upcoming(list, idx+1, cur);
+    showNext(up, firstStart, t);
     $("meter").hidden = true;
     $("mode").textContent = "Showing learned chords, right on time.";
     showBars("Coming up", up);
   } else if (stream){
-    showChord(liveCurrent || "—");
+  // 3) live listening
+    showChord(capoName(liveCurrent || "—"));
     $("next").textContent = "";
     $("meter").hidden = false;
     $("conf").style.width = (liveConf*100).toFixed(0) + "%";
     $("mode").textContent = "Listening live, about 1 second behind. Play it again for on-time chords.";
-    showBars("Recent", liveHistory.slice());
+    showBars("Recent", liveHistory.map(capoName));
   } else {
     showChord("—");
     $("next").textContent = "";
@@ -541,18 +765,30 @@ setInterval(updateDisplay, 80);
 
 // ---------- buttons ----------
 $("copy").addEventListener("click", async () => {
-  const lines = segments.some(s => byName[s.chord])
-    ? segments.filter(s => byName[s.chord]).map(s => `${fmt(s.start)}  ${s.chord}`)
-    : liveLog;
+  const src = ($("useSheet").checked && sheetSegs.length) ? sheetSegs
+    : segments.filter(s => byName[s.chord]).map(s => ({start:s.start, chord:capoName(s.chord)}));
+  const lines = src.length ? src.map(s => `${fmt(s.start)}  ${s.chord}`) : liveLog;
   if (!lines.length){ status("No chords yet. Play a song with listening on first."); return; }
   try{ await navigator.clipboard.writeText(lines.join("\n")); status(`Copied ${lines.length} chord changes.`); }
   catch(e){ status("Copy was blocked by the browser."); }
 });
 $("forget").addEventListener("click", () => {
   if (!videoId){ status("Load a song first."); return; }
-  store.del(songKey(videoId)); slots = new Map(); needSave = false; computeSegments();
+  store.del(songKey(videoId)); slots = new Map(); needSave = false;
+  meta.aligned = null; sheetSegs = []; saveMeta(); computeSegments();
   status("Forgot this song. Play it with listening on to learn it again.");
 });
+$("sheetBtn").addEventListener("click", () => { $("sheetPanel").hidden = !$("sheetPanel").hidden; });
+$("alignBtn").addEventListener("click", () => {
+  if (!videoId){ status("Load the song first, then paste its chord sheet."); return; }
+  lineUp(false);
+});
+$("clearSheet").addEventListener("click", () => {
+  $("sheetText").value = ""; meta.sheet = ""; meta.aligned = null; sheetSegs = [];
+  saveMeta(); renderTimeline(); status("Removed the chord sheet for this song.");
+});
+$("capo").addEventListener("change", () => { meta.capo = +$("capo").value; saveMeta(); shown = null; barsKey = ""; renderTimeline(); });
+$("useSheet").addEventListener("change", () => { shown = null; barsKey = ""; renderTimeline(); });
 window.addEventListener("beforeunload", saveSong);
 if (!navigator.mediaDevices || !navigator.mediaDevices.getDisplayMedia){
   status("This browser can’t listen to tab audio. Use Chrome or Edge on a computer. Learned songs still play with chords.");
