@@ -166,6 +166,7 @@ label.check{flex-direction:row; align-items:center; gap:8px}
       </select>
     </label>
     <label class="check"><input type="checkbox" id="useSheet" checked> Show chord sheet</label>
+    <label class="check"><input type="checkbox" id="focus"> Focus on guitars</label>
     <button id="copy" class="quiet">Copy chords</button>
     <button id="forget" class="quiet">Forget this song</button>
   </footer>
@@ -315,7 +316,7 @@ const store = {
   set(k,v){ try{ localStorage.setItem(k, JSON.stringify(v)); return true; }catch(e){ return false; } },
   del(k){ try{ localStorage.removeItem(k); }catch(e){} }
 };
-const settings = Object.assign({minLen:1.0, picky:45, sync:0}, store.get("chordListener:settings") || {});
+const settings = Object.assign({minLen:1.0, picky:45, sync:0, focus:false}, store.get("chordListener:settings") || {});
 
 let player = null, playerReady = false, videoId = null, playing = false, knownDur = 0;
 let ctx = null, analyser, stream = null, timer = null, binPc, binBass, freq;
@@ -326,6 +327,14 @@ let slots = new Map(), segments = [];
 let needSave = false, needCompute = false, lastSave = 0, lastCompute = 0;
 let lastVT = null, skipUntil = 0;
 let shown = null, barsKey = "";
+let normGain = null, sideGain = null, levelMid = null, levelSide = null, focusFallback = false, lowSpread = 0, lastSpreadCheck = 0;
+function applyFocus(){
+  if (!normGain) return;
+  const on = settings.focus && !focusFallback;
+  normGain.gain.value = on ? 0 : 1;
+  sideGain.gain.value = on ? 1 : 0;
+}
+function rms(a){ let x = 0; for (let i=0; i<a.length; i++) x += a[i]*a[i]; return Math.sqrt(x/a.length); }
 let meta = {capo:0, sheet:"", aligned:null}, sheetSegs = [], needAlign = false;
 let sheetParsed = {seq:[], capo:null}, vocabT = [], sheetK = 0, lastAlign = 0;
 
@@ -335,6 +344,7 @@ function fmt(t){ t = Math.max(0, Math.floor(t)); return `${Math.floor(t/60)}:${S
 // ---------- settings ----------
 function applySettings(){
   $("minLen").value = settings.minLen; $("picky").value = settings.picky; $("sync").value = settings.sync;
+  $("focus").checked = !!settings.focus;
   $("syncVal").textContent = (+settings.sync).toFixed(2);
   $("minVal").textContent = (+settings.minLen).toFixed(1);
 }
@@ -368,6 +378,7 @@ function loadVideo(){
   saveSong();
   videoId = id; slots = loadSong(id); knownDur = 0; lastVT = null;
   loadMeta(id);
+  focusFallback = false; lowSpread = 0; applyFocus();
   computeSegments();
   $("placeholder").hidden = true;
   if (!player){
@@ -711,7 +722,19 @@ async function startListening(){
   ctx = new AudioContext();
   const src = ctx.createMediaStreamSource(new MediaStream(stream.getAudioTracks()));
   analyser = ctx.createAnalyser(); analyser.fftSize = 16384; analyser.smoothingTimeConstant = 0;
-  src.connect(analyser);
+  // Full mix path
+  normGain = ctx.createGain(); src.connect(normGain); normGain.connect(analyser);
+  // Guitar-focus path: left minus right cancels whatever is mixed dead center
+  // (usually vocals, bass, kick and snare) and keeps instruments panned to the sides.
+  const split = ctx.createChannelSplitter(2), gL = ctx.createGain(), gR = ctx.createGain();
+  gR.gain.value = -1;
+  sideGain = ctx.createGain();
+  src.connect(split); split.connect(gL, 0); split.connect(gR, 1);
+  gL.connect(sideGain); gR.connect(sideGain); sideGain.connect(analyser);
+  // level meters to check whether the recording has any stereo spread
+  levelMid = ctx.createAnalyser(); levelMid.fftSize = 2048; src.connect(levelMid);
+  levelSide = ctx.createAnalyser(); levelSide.fftSize = 2048; gL.connect(levelSide); gR.connect(levelSide);
+  lowSpread = 0; applyFocus();
   const n = analyser.frequencyBinCount;
   binPc = new Int8Array(n).fill(-1); binBass = new Uint8Array(n); freq = new Float32Array(n);
   for (let i=1; i<n; i++){
@@ -732,7 +755,7 @@ function stopListening(){
   clearInterval(timer); timer = null;
   if (stream) stream.getTracks().forEach(t=>t.stop());
   if (ctx) ctx.close();
-  stream = ctx = null;
+  stream = ctx = null; normGain = sideGain = levelMid = levelSide = null;
   computeSegments(); saveSong();
   $("listen").textContent = "Turn on listening";
   status("Listening is off. Learned parts of the song still show chords on time.");
@@ -773,6 +796,20 @@ function tick(){
     }
   }
   const now = performance.now();
+  // If the song is basically mono, focus mode would only hear silence: fall back to the full mix.
+  if (levelMid && now - lastSpreadCheck > 2000){
+    lastSpreadCheck = now;
+    const a1 = new Float32Array(2048), a2 = new Float32Array(2048);
+    levelMid.getFloatTimeDomainData(a1); levelSide.getFloatTimeDomainData(a2);
+    const m = rms(a1), sd = rms(a2);
+    if (settings.focus && !focusFallback && m > 0.01){
+      lowSpread = sd/m < 0.1 ? lowSpread + 1 : 0;
+      if (lowSpread >= 3){
+        focusFallback = true; applyFocus();
+        status("This recording has almost no left-right spread, so Focus on guitars can’t separate it. Using the full mix for this song.");
+      }
+    }
+  }
   if (needCompute && now - lastCompute > 2000){ computeSegments(); lastCompute = now; }
   if (sheetActive() && needAlign && now - lastAlign > 15000 && coverage() >= 0.5){ lastAlign = now; lineUp(true); }
   if (needSave && now - lastSave > 5000){ saveSong(); lastSave = now; }
@@ -906,6 +943,13 @@ $("sheetText").addEventListener("input", () => {
     refreshVocab(); updateSheetInfo(); saveMeta(); liveHistory.length = 0; computeSegments();
     if (videoId && sheetActive() && coverage() >= 0.5) lineUp(false);
   }, 600);
+});
+$("focus").addEventListener("change", () => {
+  settings.focus = $("focus").checked; store.set("chordListener:settings", settings);
+  focusFallback = false; lowSpread = 0; applyFocus();
+  status(settings.focus
+    ? "Focus on guitars is on. The page now listens mainly to instruments panned left and right, and less to vocals, bass, and drums."
+    : "Focus on guitars is off. The page is listening to the full mix.");
 });
 window.addEventListener("beforeunload", saveSong);
 if (!navigator.mediaDevices || !navigator.mediaDevices.getDisplayMedia){
